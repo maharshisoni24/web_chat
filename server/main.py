@@ -1,27 +1,29 @@
 """
 main.py — FastAPI WebSocket backend with Private Rooms & Persistence
 ===================================================================
-Endpoint : ws://localhost:8000/ws
-Health   : GET http://localhost:8000/health
+WebSocket : ws://localhost:<PORT>/ws
+Health    : GET  /health
+Feed      : GET  /feed          — returns all messages (required by assignment)
+Message   : POST /message       — submit a message via HTTP (required by assignment)
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 import logging
 from typing import Dict, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 import sys
 from pathlib import Path
-import logging
 
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
-
 
 server_dir = Path(__file__).parent
 if str(server_dir) not in sys.path:
@@ -32,7 +34,6 @@ try:
 except ImportError:
     from server import database as db
 
-# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -40,11 +41,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Initialize Database ──────────────────────────────────────────────────────
 db.init_db()
 
-# ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Group Chat Server with Private Rooms", version="2.0.0")
+app = FastAPI(title="Group Chat Server with Private Rooms", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,9 +58,7 @@ class RoomConnectionManager:
     """Manages WebSocket connections partitioned by room_id."""
 
     def __init__(self) -> None:
-        # Maps WebSocket → {"id": str, "username": str, "room_id": str}
         self._clients: Dict[WebSocket, dict] = {}
-        # Maps room_id → set of WebSockets
         self._room_members: Dict[str, Set[WebSocket]] = {}
 
     async def _send(self, ws: WebSocket, payload: dict) -> None:
@@ -108,19 +105,16 @@ class RoomConnectionManager:
             await self._send(ws, {"type": "error", "message": "Room not found"})
             return False
 
-        # 1. Leave current room if in one
         if current_room_id and current_room_id in self._room_members:
             self._room_members[current_room_id].discard(ws)
             if not self._room_members[current_room_id]:
                 del self._room_members[current_room_id]
-            # Notify old room
             await self.broadcast_to_room(current_room_id, {
                 "type": "user_left",
                 "roomId": current_room_id,
                 "username": username
             })
 
-        # 2. Join target room
         client["room_id"] = target_room_id
         if target_room_id not in self._room_members:
             self._room_members[target_room_id] = set()
@@ -128,7 +122,6 @@ class RoomConnectionManager:
 
         log.info("User %s switched to room: %s (%s)", username, room_info["name"], target_room_id)
 
-        # 3. Send room info + room history + current user list to client
         history = db.get_room_messages(target_room_id)
         room_users = self.get_room_users(target_room_id)
 
@@ -139,7 +132,6 @@ class RoomConnectionManager:
             "users": [u for u in room_users if u != username]
         })
 
-        # 4. Broadcast user_joined to new room
         await self.broadcast_to_room(target_room_id, {
             "type": "user_joined",
             "roomId": target_room_id,
@@ -169,7 +161,7 @@ class RoomConnectionManager:
                     "username": username
                 })
 
-    async def handle_message(self, ws: WebSocket, text: str) -> None:
+    async def handle_message(self, ws: WebSocket, text: str, msg_id: str = None) -> None:
         client = self._clients.get(ws)
         if not client:
             return
@@ -179,11 +171,11 @@ class RoomConnectionManager:
         sender_id = client["id"]
         now = int(time.time() * 1000)
 
-        # Encrypt + sign + persist (all crypto happens inside save_message)
-        msg_record = db.save_message(room_id, username, sender_id, text, now)
+        msg_record = db.save_message(room_id, username, sender_id, text, now, msg_id=msg_id)
 
         payload = {
             "type": "message",
+            "id": msg_record["id"],
             "roomId": room_id,
             "sender": username,
             "senderId": sender_id,
@@ -198,12 +190,80 @@ class RoomConnectionManager:
 manager = RoomConnectionManager()
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── HTTP Routes ───────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "total_clients": len(manager._clients)}
 
+
+@app.get("/feed")
+async def feed():
+    """Return latest messages across all rooms. Required assignment endpoint."""
+    messages = db.get_all_messages(limit=500)
+    return JSONResponse(content={"messages": messages, "count": len(messages)})
+
+
+@app.post("/message")
+async def submit_message(request: Request):
+    """Accept a chat message via HTTP POST. Required assignment endpoint.
+
+    Accepts:
+      - form data: client-name, msg
+      - OR JSON body: {"client-name": "...", "msg": "..."}
+      - Optional: msg-id (UUID) for dedup across backends
+    """
+    content_type = request.headers.get("content-type", "")
+
+    if "application/json" in content_type:
+        body = await request.json()
+        client_name = str(body.get("client-name", body.get("client_name", "Anonymous"))).strip()[:50]
+        msg_text = str(body.get("msg", "")).strip()
+        msg_id = body.get("msg-id") or body.get("msg_id") or str(uuid.uuid4())
+    else:
+        # form-encoded
+        form = await request.form()
+        client_name = str(form.get("client-name", form.get("client_name", "Anonymous"))).strip()[:50]
+        msg_text = str(form.get("msg", "")).strip()
+        msg_id = form.get("msg-id") or form.get("msg_id") or str(uuid.uuid4())
+
+    if not client_name:
+        client_name = "Anonymous"
+    if not msg_text:
+        return JSONResponse(status_code=400, content={"error": "msg field is required"})
+
+    sender_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, client_name))[:8]
+    now = int(time.time() * 1000)
+
+    # Direct call — thread-local connections + _write_lock in database.py
+    # handle concurrency. run_in_executor was bottlenecked by thread pool size.
+    msg_record = db.save_message("global", client_name, sender_id, msg_text, now, msg_id=msg_id)
+
+    # Broadcast to any connected WebSocket clients in the global room
+    payload = {
+        "type": "message",
+        "id": msg_record["id"],
+        "roomId": "global",
+        "sender": client_name,
+        "senderId": sender_id,
+        "text": msg_record["text"],
+        "timestamp": now,
+        "verified": msg_record["verified"],
+        "tampered": msg_record["tampered"],
+    }
+    await manager.broadcast_to_room("global", payload)
+
+    return JSONResponse(content={
+        "status": "ok",
+        "msg-id": msg_record["id"],
+        "inserted": msg_record.get("inserted", True),
+        "sender": client_name,
+        "msg": msg_text,
+        "timestamp": now,
+    })
+
+
+# ── WebSocket Endpoint ────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
@@ -230,8 +290,6 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 room_name = str(msg.get("name", "Private Room")).strip()[:30] or "Private Room"
                 new_room = db.create_room(room_name, is_private=True)
                 log.info("Room created: %s (code=%s)", new_room["name"], new_room["code"])
-                
-                # Send confirmation and automatically join the room
                 await ws.send_text(json.dumps({"type": "room_created", "room": new_room}))
                 await manager.switch_room(ws, new_room["id"])
 
@@ -265,8 +323,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 if not username:
                     continue
                 text = str(msg.get("text", "")).strip()
+                msg_id = msg.get("id") or msg.get("msg_id") or None
                 if text:
-                    await manager.handle_message(ws, text)
+                    await manager.handle_message(ws, text, msg_id=msg_id)
 
     except WebSocketDisconnect:
         await manager.disconnect(ws)

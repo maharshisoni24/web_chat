@@ -1,36 +1,38 @@
 {
   "mode": "distributed_lab",
-  "description": "Multi-system network deployment configuration across the 4 allocated lab machines (Sys1, Sys2, Sys3, Sys4)",
+  "description": "Avinash's lab — SSH host 10.1.75.53, ports 2205-2208",
   "network_map": {
     "Sys1": {
-      "role": "Load Balancer (Server)",
-      "ssh_port": 2237,
-      "internal_ip": "172.17.0.38",
-      "service_port": 8000
+      "role": "Load Balancer",
+      "ssh_port": 2205,
+      "external_address": "10.1.75.53",
+      "lb_port": 5205,
+      "note": "App runs on local 5000, exposed as 10.1.75.53:5205"
     },
     "Sys2": {
       "role": "Backend Server 1",
-      "ssh_port": 2238,
-      "internal_ip": "172.17.0.39",
-      "service_port": 8000
+      "ssh_port": 2206,
+      "external_address": "10.1.75.53",
+      "app_port": 5206
     },
     "Sys3": {
       "role": "Backend Server 2",
-      "ssh_port": 2239,
-      "internal_ip": "172.17.0.40",
-      "service_port": 8000
+      "ssh_port": 2207,
+      "external_address": "10.1.75.53",
+      "app_port": 5207
     },
     "Sys4": {
       "role": "Backend Server 3",
-      "ssh_port": 2240,
-      "internal_ip": "172.17.0.41",
-      "service_port": 8000
+      "ssh_port": 2208,
+      "external_address": "10.1.75.53",
+      "app_port": 5208
     }
   },
   "load_balancer": {
     "host": "0.0.0.0",
-    "port": 8000,
-    "algorithm": "round_robin",
+    "port": 5000,
+    "algorithm": "performance",
+    "overload_threshold": 500,
     "health_check_interval_seconds": 3,
     "health_check_timeout_seconds": 2.0,
     "retry_attempts": 2
@@ -38,26 +40,27 @@
   "backends": [
     {
       "id": "Sys2",
-      "host": "172.17.0.39",
-      "port": 8000,
+      "host": "10.1.75.53",
+      "port": 5206,
       "weight": 1
     },
     {
       "id": "Sys3",
-      "host": "172.17.0.40",
-      "port": 8000,
+      "host": "10.1.75.53",
+      "port": 5207,
       "weight": 1
     },
     {
       "id": "Sys4",
-      "host": "172.17.0.41",
-      "port": 8000,
+      "host": "10.1.75.53",
+      "port": 5208,
       "weight": 1
     }
   ],
-  "experiment_workload": {
-    "requests": 300,
-    "concurrency": 15,
-    "work_delay_ms": 20
+  "submit_url": "http://10.1.75.53:5205",
+  "api_routes": {
+    "message": "POST http://10.1.75.53:5205/message",
+    "feed": "GET http://10.1.75.53:5205/feed",
+    "lb_status": "GET http://10.1.75.53:5205/lb/status"
   }
 }

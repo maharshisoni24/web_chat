@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-deploy.py - Deploy Local-Web-Chat to 4-machine distributed lab
+deploy.py — Deploy web_chat to your 4 allocated lab systems.
+
+Port mapping:
+  SSH host  : 10.1.75.53
+  Sys1 ssh  : 2205  → app ports 3205,4205,5205,6205,7205  (LB on local 5000 → 10.1.75.53:5205)
+  Sys2 ssh  : 2206  → app ports 3206,4206,5206,6206,7206  (backend on local 5000 → 10.1.75.53:5206)
+  Sys3 ssh  : 2207  → app ports 3207,4207,5207,6207,7207  (backend on local 5000 → 10.1.75.53:5207)
+  Sys4 ssh  : 2208  → app ports 3208,4208,5208,6208,7208  (backend on local 5000 → 10.1.75.53:5208)
 
 Usage:
     python deploy.py              # Deploy everything
     python deploy.py --backends   # Only deploy backends (Sys2/3/4)
-    python deploy.py --lb         # Only deploy load balancer (Sys1)
-    python deploy.py --status     # Check if services are running
+    python deploy.py --lb         # Only deploy LB (Sys1)
+    python deploy.py --status     # Check service status
     python deploy.py --stop       # Stop all remote services
 """
 
@@ -23,34 +30,41 @@ except ImportError:
     print("ERROR: paramiko not installed. Run: pip install paramiko")
     sys.exit(1)
 
-# Lab Configuration
-SSH_HOST = "10.1.75.79"
+# ── Lab Configuration ──────────────────────────────────────────────────────────
+SSH_HOST = "10.1.75.53"
 SSH_USER = "student"
-SSH_PASS = "antar2006"
+SSH_PASS = "abhi1patel"
+
+# Local app port (on each SSH system) — maps to external port as 5000 → 52XX
+BACKEND_LOCAL_PORT = 5000    # backends listen here
+LB_LOCAL_PORT      = 6000    # LB listens here → accessible at 10.1.75.53:6205
 
 MACHINES = {
-    "Sys1": {"ssh_port": 2237, "internal_ip": "172.17.0.38", "role": "loadbalancer"},
-    "Sys2": {"ssh_port": 2238, "internal_ip": "172.17.0.39", "role": "backend"},
-    "Sys3": {"ssh_port": 2239, "internal_ip": "172.17.0.40", "role": "backend"},
-    "Sys4": {"ssh_port": 2240, "internal_ip": "172.17.0.41", "role": "backend"},
+    "Sys1": {"ssh_port": 2205, "external_port": 6205, "role": "loadbalancer"},
+    "Sys2": {"ssh_port": 2206, "external_port": 5206, "role": "backend"},
+    "Sys3": {"ssh_port": 2207, "external_port": 5207, "role": "backend"},
+    "Sys4": {"ssh_port": 2208, "external_port": 5208, "role": "backend"},
 }
 
 BACKEND_MACHINES = ["Sys2", "Sys3", "Sys4"]
-BACKEND_INTERNAL_IPS = [MACHINES[s]["internal_ip"] for s in BACKEND_MACHINES]
+# Backends are reached by the LB via the external-facing address
+BACKEND_EXTERNAL_URLS = [
+    f"http://{SSH_HOST}:{MACHINES[s]['external_port']}" for s in BACKEND_MACHINES
+]
 
 REMOTE_BACKEND_DIR = "/home/student/chat-backend"
-REMOTE_LB_DIR = "/home/student/loadbalancer"
+REMOTE_LB_DIR      = "/home/student/loadbalancer"
 
-HERE = Path(__file__).parent
+HERE       = Path(__file__).parent
 SERVER_DIR = HERE / "server"
-LB_DIR = HERE / "load_balancer"
+LB_DIR     = HERE / "load_balancer"
 
 
 def make_ssh(sys_name):
     cfg = MACHINES[sys_name]
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    print(f"  Connecting to {sys_name} (ssh_port {cfg['ssh_port']})...", end=" ", flush=True)
+    print(f"  Connecting to {sys_name} (ssh -p {cfg['ssh_port']} {SSH_USER}@{SSH_HOST})...", end=" ", flush=True)
     client.connect(
         hostname=SSH_HOST, port=cfg["ssh_port"],
         username=SSH_USER, password=SSH_PASS,
@@ -87,7 +101,7 @@ def check_python(client):
 
 def deploy_backend(sys_name):
     print(f"\n{'='*55}")
-    print(f"  Deploying BACKEND to {sys_name}")
+    print(f"  Deploying BACKEND to {sys_name} (port {BACKEND_LOCAL_PORT} → {MACHINES[sys_name]['external_port']})")
     print(f"{'='*55}")
 
     client = make_ssh(sys_name)
@@ -106,11 +120,10 @@ def deploy_backend(sys_name):
         else:
             print(f"    [SKIP] {fname} (not found locally)")
 
-    # Ensure requirements.txt exists remotely
     run_remote(
         client,
         f"test -f {REMOTE_BACKEND_DIR}/server/requirements.txt || "
-        f"echo 'fastapi\\nuvicorn[standard]\\ncryptography\\npython-multipart' "
+        f"echo 'fastapi\nuvicorn[standard]\ncryptography\npython-multipart' "
         f"> {REMOTE_BACKEND_DIR}/server/requirements.txt"
     )
 
@@ -126,12 +139,12 @@ def deploy_backend(sys_name):
     )
     print("OK" if "error" not in pip_out.lower() else f"WARN ({pip_out[:80]})")
 
-    # Write startup script
     startup = (
         f"#!/bin/bash\n"
         f"cd {REMOTE_BACKEND_DIR}\n"
-        f"export BACKEND_PORT=8000\n"
-        f"nohup {python_bin} -m uvicorn server.main:app --host 0.0.0.0 --port 8000 "
+        f"export BACKEND_PORT={BACKEND_LOCAL_PORT}\n"
+        f"nohup {python_bin} -m uvicorn server.main:app "
+        f"--host 0.0.0.0 --port {BACKEND_LOCAL_PORT} "
         f"> {REMOTE_BACKEND_DIR}/backend.log 2>&1 &\n"
         f"echo $! > {REMOTE_BACKEND_DIR}/backend.pid\n"
         f"echo Backend started with PID $(cat {REMOTE_BACKEND_DIR}/backend.pid)\n"
@@ -144,11 +157,15 @@ def deploy_backend(sys_name):
     print(out if out else "launched")
 
     time.sleep(3)
-    health = run_remote(client, "curl -s http://127.0.0.1:8000/health 2>/dev/null || echo NORESPONSE", ignore_errors=True)
+    health = run_remote(
+        client,
+        f"curl -s http://127.0.0.1:{BACKEND_LOCAL_PORT}/health 2>/dev/null || echo NORESPONSE",
+        ignore_errors=True
+    )
     if '"status"' in health or '"ok"' in health:
-        print(f"  [HEALTHY] {sys_name} backend is UP: {health}")
+        print(f"  [HEALTHY] {sys_name} backend UP → http://{SSH_HOST}:{MACHINES[sys_name]['external_port']}/health")
     else:
-        print(f"  [STARTING] {sys_name} still starting - check: tail -f {REMOTE_BACKEND_DIR}/backend.log")
+        print(f"  [STARTING] {sys_name} still starting — check: tail -f {REMOTE_BACKEND_DIR}/backend.log")
         log_out = run_remote(client, f"tail -n 10 {REMOTE_BACKEND_DIR}/backend.log 2>/dev/null", ignore_errors=True)
         print(f"  [LOG]: {log_out}")
 
@@ -160,6 +177,7 @@ def deploy_loadbalancer():
     sys_name = "Sys1"
     print(f"\n{'='*55}")
     print(f"  Deploying LOAD BALANCER to {sys_name}")
+    print(f"  LB URL: http://{SSH_HOST}:{MACHINES[sys_name]['external_port']}")
     print(f"{'='*55}")
 
     client = make_ssh(sys_name)
@@ -168,7 +186,7 @@ def deploy_loadbalancer():
     kill_remote_services(client, "loadbalancer")
     run_remote(client, f"mkdir -p {REMOTE_LB_DIR}/load_balancer")
 
-    lb_files = ["__init__.py", "balancer.py", "algorithms.py", "health_checker.py"]
+    lb_files = ["__init__.py", "balancer.py", "algorithms.py", "health_checker.py", "lb_fastapi.py"]
     print("  Uploading load balancer files...")
     for fname in lb_files:
         lf = LB_DIR / fname
@@ -179,16 +197,15 @@ def deploy_loadbalancer():
             print(f"    [SKIP] {fname}")
 
     python_bin = check_python(client)
-    backend_urls = ",".join(f"http://{ip}:8000" for ip in BACKEND_INTERNAL_IPS)
+    backend_urls = ",".join(BACKEND_EXTERNAL_URLS)
     print(f"  Backend targets: {backend_urls}")
 
     startup = (
         f"#!/bin/bash\n"
         f"cd {REMOTE_LB_DIR}\n"
-        f"nohup {python_bin} load_balancer/balancer.py "
-        f"--host 0.0.0.0 --port 8000 "
-        f"--backends {backend_urls} "
-        f"--algorithm ip_hash "
+        f"BACKENDS={backend_urls} "
+        f"nohup {python_bin} -m uvicorn lb_fastapi:app "
+        f"--host 0.0.0.0 --port {LB_LOCAL_PORT} "
         f"> {REMOTE_LB_DIR}/lb.log 2>&1 &\n"
         f"echo $! > {REMOTE_LB_DIR}/lb.pid\n"
         f"echo LB started with PID $(cat {REMOTE_LB_DIR}/lb.pid)\n"
@@ -201,11 +218,19 @@ def deploy_loadbalancer():
     print(out if out else "launched")
 
     time.sleep(3)
-    status = run_remote(client, "curl -s http://127.0.0.1:8000/lb/status 2>/dev/null | head -c 300 || echo NORESPONSE", ignore_errors=True)
-    if '"service"' in status or "Sys1" in status:
-        print(f"  [HEALTHY] {sys_name} Load Balancer is UP")
+    status = run_remote(
+        client,
+        f"curl -s http://127.0.0.1:{LB_LOCAL_PORT}/lb/status 2>/dev/null | head -c 300 || echo NORESPONSE",
+        ignore_errors=True
+    )
+    if '"service"' in status or "LoadBalancer" in status:
+        print(f"  [HEALTHY] Load Balancer UP")
+        print(f"\n  ★ SUBMIT THIS URL: http://{SSH_HOST}:{MACHINES[sys_name]['external_port']}")
+        print(f"    /message : http://{SSH_HOST}:{MACHINES[sys_name]['external_port']}/message")
+        print(f"    /feed    : http://{SSH_HOST}:{MACHINES[sys_name]['external_port']}/feed")
+        print(f"    /lb/status: http://{SSH_HOST}:{MACHINES[sys_name]['external_port']}/lb/status")
     else:
-        print(f"  [STARTING] LB still starting - check: tail -f {REMOTE_LB_DIR}/lb.log")
+        print(f"  [STARTING] LB still starting — check: tail -f {REMOTE_LB_DIR}/lb.log")
         log_out = run_remote(client, f"tail -n 10 {REMOTE_LB_DIR}/lb.log 2>/dev/null", ignore_errors=True)
         print(f"  [LOG]: {log_out}")
 
@@ -221,17 +246,20 @@ def check_status():
         try:
             client = make_ssh(sys_name)
             role = cfg["role"]
+            port = BACKEND_LOCAL_PORT if role == "backend" else LB_LOCAL_PORT
             if role == "backend":
-                out = run_remote(client, "curl -s http://127.0.0.1:8000/health 2>/dev/null || echo DOWN", ignore_errors=True)
+                out = run_remote(client, f"curl -s http://127.0.0.1:{port}/health 2>/dev/null || echo DOWN", ignore_errors=True)
                 ok = '"status"' in out or '"ok"' in out
-                print(f"  {sys_name} Backend       : {'UP' if ok else 'DOWN'} | {out[:60]}")
+                ext = cfg["external_port"]
+                print(f"  {sys_name} Backend  : {'UP ✓' if ok else 'DOWN ✗'}  → http://{SSH_HOST}:{ext}/health")
             elif role == "loadbalancer":
-                out = run_remote(client, "curl -s http://127.0.0.1:8000/lb/status 2>/dev/null | head -c 100 || echo DOWN", ignore_errors=True)
+                out = run_remote(client, f"curl -s http://127.0.0.1:{port}/lb/status 2>/dev/null | head -c 100 || echo DOWN", ignore_errors=True)
                 ok = '"service"' in out
-                print(f"  {sys_name} LoadBalancer  : {'UP' if ok else 'DOWN'}")
+                ext = cfg["external_port"]
+                print(f"  {sys_name} LB       : {'UP ✓' if ok else 'DOWN ✗'}  → http://{SSH_HOST}:{ext}/lb/status")
             client.close()
         except Exception as e:
-            print(f"  {sys_name}: SSH FAILED - {e}")
+            print(f"  {sys_name}: SSH FAILED — {e}")
 
 
 def stop_all():
@@ -245,11 +273,11 @@ def stop_all():
             print(f"  {sys_name}: stopped")
             client.close()
         except Exception as e:
-            print(f"  {sys_name}: FAILED - {e}")
+            print(f"  {sys_name}: FAILED — {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Deploy Local-Web-Chat to lab machines")
+    parser = argparse.ArgumentParser(description="Deploy web_chat to lab machines")
     parser.add_argument("--backends", action="store_true")
     parser.add_argument("--lb", action="store_true")
     parser.add_argument("--status", action="store_true")
@@ -267,11 +295,13 @@ def main():
     deploy_lb_only = args.lb and not args.backends
     deploy_all = not args.backends and not args.lb
 
-    print("\nLocal-Web-Chat Distributed Lab Deployment")
+    print("\nweb_chat Distributed Lab Deployment")
     print(f"  SSH Host : {SSH_HOST}")
-    print(f"  Backends : {', '.join(BACKEND_INTERNAL_IPS)}")
-    print(f"  LB       : {MACHINES['Sys1']['internal_ip']}")
-    print("  Algorithm: ip_hash\n")
+    print(f"  LB URL   : http://{SSH_HOST}:{MACHINES['Sys1']['external_port']}")
+    print(f"  Backends :")
+    for s in BACKEND_MACHINES:
+        print(f"    {s}: http://{SSH_HOST}:{MACHINES[s]['external_port']}")
+    print("  Algorithm: performance (dynamic)\n")
 
     if deploy_all or deploy_backends_only:
         for sys_name in BACKEND_MACHINES:
@@ -289,16 +319,11 @@ def main():
     print(f"\n{'='*55}")
     print("  Deployment complete!")
     print()
-    print("  NEXT STEPS:")
-    print("  1. Run tunnel.bat in a NEW terminal window (keep it open)")
-    print("     This forwards localhost:8000 -> Sys1 LB")
-    print()
-    print("  2. In this terminal, start frontend:")
-    print("     npm run frontend")
-    print()
-    print("  3. Open browser: http://localhost:5000")
-    print()
-    print("  4. LB status: http://localhost:8000/lb/status  (tunnel must be running)")
+    print(f"  ★ SUBMIT URL : http://{SSH_HOST}:{MACHINES['Sys1']['external_port']}")
+    print(f"  POST /message: curl -X POST http://{SSH_HOST}:{MACHINES['Sys1']['external_port']}/message \\")
+    print(f"                       -d 'client-name=Alice&msg=Hello'")
+    print(f"  GET  /feed   : curl http://{SSH_HOST}:{MACHINES['Sys1']['external_port']}/feed")
+    print(f"  LB Status    : curl http://{SSH_HOST}:{MACHINES['Sys1']['external_port']}/lb/status")
     print(f"{'='*55}\n")
 
 

@@ -362,17 +362,19 @@ class LoadBalancerServer(ThreadingHTTPServer):
         host: str,
         port: int,
         nodes: List[BackendNode],
-        algorithm_name: str = "round_robin",
+        algorithm_name: str = "performance",
         health_interval: float = 3.0,
         health_timeout: float = 1.5,
         timeout: float = 5.0,
-        retry_attempts: int = 2
+        retry_attempts: int = 2,
+        overload_threshold: float = 500.0
     ):
         self.host = host
         self.port = port
         self.nodes = nodes
         self.algorithm_name = algorithm_name
-        self.algorithm: LoadBalancerAlgorithm = get_algorithm(algorithm_name, nodes)
+        self.overload_threshold = overload_threshold
+        self.algorithm: LoadBalancerAlgorithm = get_algorithm(algorithm_name, nodes, overload_threshold=getattr(self, 'overload_threshold', 500.0))
         self.timeout = timeout
         self.retry_attempts = max(1, retry_attempts)
         self.start_time = time.time()
@@ -404,17 +406,18 @@ def create_nodes_from_config(config_dict: Dict[str, Any]) -> List[BackendNode]:
 
 def run_load_balancer(
     host: str = "0.0.0.0",
-    port: int = 8000,
+    port: int = 5000,
     nodes: Optional[List[BackendNode]] = None,
-    algorithm: str = "round_robin",
+    algorithm: str = "performance",
     health_interval: float = 3.0,
-    health_timeout: float = 1.5
+    health_timeout: float = 1.5,
+    overload_threshold: float = 500.0
 ):
     if not nodes:
         nodes = [
-            BackendNode("Sys2", "127.0.0.1", 8001),
-            BackendNode("Sys3", "127.0.0.1", 8002),
-            BackendNode("Sys4", "127.0.0.1", 8003)
+            BackendNode("Sys2", "10.1.75.53", 5206),
+            BackendNode("Sys3", "10.1.75.53", 5207),
+            BackendNode("Sys4", "10.1.75.53", 5208),
         ]
 
     server = LoadBalancerServer(
@@ -423,7 +426,8 @@ def run_load_balancer(
         nodes=nodes,
         algorithm_name=algorithm,
         health_interval=health_interval,
-        health_timeout=health_timeout
+        health_timeout=health_timeout,
+        overload_threshold=overload_threshold
     )
 
     logger.info("=" * 60)
@@ -450,7 +454,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default=None, help="Path to config JSON file")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind (default: 8000)")
-    parser.add_argument("--algorithm", type=str, default="round_robin", help="Algorithm: round_robin, weighted_round_robin, least_connections, ip_hash")
+    parser.add_argument("--algorithm", type=str, default="performance", help="Algorithm: performance, round_robin, weighted_round_robin, least_connections, ip_hash")
+    parser.add_argument("--threshold", type=float, default=500.0, help="Overload threshold for performance algo (default: 500)")
     parser.add_argument("--backends", type=str, default=None, help="Comma-separated backend URLs, e.g. http://127.0.0.1:8001,http://127.0.0.1:8002")
     
     args = parser.parse_args()
@@ -478,9 +483,9 @@ if __name__ == "__main__":
         port = args.port
         algo = args.algorithm
         nodes = [
-            BackendNode("Sys2", "127.0.0.1", 8001),
-            BackendNode("Sys3", "127.0.0.1", 8002),
-            BackendNode("Sys4", "127.0.0.1", 8003)
+            BackendNode("Sys2", "10.1.75.53", 5206),
+            BackendNode("Sys3", "10.1.75.53", 5207),
+            BackendNode("Sys4", "10.1.75.53", 5208),
         ]
 
-    run_load_balancer(host=host, port=port, nodes=nodes, algorithm=algo)
+    run_load_balancer(host=host, port=port, nodes=nodes, algorithm=algo, overload_threshold=getattr(args, "threshold", 500.0))

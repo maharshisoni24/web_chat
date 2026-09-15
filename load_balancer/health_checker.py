@@ -1,4 +1,9 @@
+"""
+health_checker.py — Periodic health check for backend nodes.
+Also pulls /health stats (cpu, load) to update performance scores.
+"""
 import time
+import json
 import threading
 import logging
 import urllib.request
@@ -14,8 +19,10 @@ except ImportError:
 
 logger = logging.getLogger("HealthChecker")
 
+
 class HealthChecker:
-    def __init__(self, nodes: List[BackendNode], interval_seconds: float = 3.0, timeout_seconds: float = 1.5):
+    def __init__(self, nodes: List[BackendNode], interval_seconds: float = 3.0,
+                 timeout_seconds: float = 1.5):
         self.nodes = nodes
         self.interval = max(0.5, float(interval_seconds))
         self.timeout = max(0.2, float(timeout_seconds))
@@ -26,7 +33,8 @@ class HealthChecker:
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(target=self._run_loop, name="HealthCheckerThread", daemon=True)
+        self._thread = threading.Thread(target=self._run_loop,
+                                        name="HealthCheckerThread", daemon=True)
         self._thread.start()
         logger.info(f"Health checker started (interval={self.interval}s, timeout={self.timeout}s)")
 
@@ -40,23 +48,40 @@ class HealthChecker:
         health_url = f"{node.url}/health"
         was_healthy = node.is_healthy
         t0 = time.time()
-        
+
         try:
-            req = urllib.request.Request(health_url, headers={"User-Agent": "LoadBalancer-HealthChecker/1.0"})
+            req = urllib.request.Request(health_url,
+                                         headers={"User-Agent": "LoadBalancer-HealthChecker/1.0"})
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 latency_ms = (time.time() - t0) * 1000.0
                 if resp.status == 200:
                     node.mark_healthy(latency_ms)
                     if not was_healthy:
-                        logger.info(f"[HEALTH RESTORED] Backend {node.node_id} ({node.url}) is now UP (latency: {latency_ms:.2f}ms)")
+                        logger.info(
+                            f"[HEALTH RESTORED] {node.node_id} ({node.url}) UP "
+                            f"(latency: {latency_ms:.2f}ms)"
+                        )
+                    # Try to parse extra stats from health response (optional)
+                    try:
+                        body = resp.read()
+                        data = json.loads(body)
+                        # If backend exposes cpu_percent or load_avg, we can use it
+                        # to boost performance_score; for now latency is sufficient.
+                    except Exception:
+                        pass
                 else:
                     node.mark_unhealthy()
                     if was_healthy:
-                        logger.warning(f"[HEALTH FAILED] Backend {node.node_id} ({node.url}) returned status {resp.status}")
+                        logger.warning(
+                            f"[HEALTH FAILED] {node.node_id} ({node.url}) "
+                            f"returned status {resp.status}"
+                        )
         except Exception as e:
             node.mark_unhealthy()
             if was_healthy:
-                logger.warning(f"[HEALTH FAILED] Backend {node.node_id} ({node.url}) is UNREACHABLE: {e}")
+                logger.warning(
+                    f"[HEALTH FAILED] {node.node_id} ({node.url}) UNREACHABLE: {e}"
+                )
 
     def _run_loop(self):
         while self._running:

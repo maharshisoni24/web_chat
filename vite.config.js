@@ -1,33 +1,37 @@
 import { defineConfig } from 'vite';
 
+const LB = 'http://10.1.75.53:6205';
+const LB_WS = 'ws://10.1.75.53:6205';
+
 export default defineConfig({
   server: {
     host: '0.0.0.0',
-    port: 5000,
+    port: 3000,
 
     proxy: {
-      // WebSocket connections -> Sys1 Python Load Balancer
       '/ws': {
-        target: 'ws://127.0.0.1:6000',
+        target: LB_WS,
         ws: true,
         changeOrigin: true,
       },
-
-      // HTTP health endpoint -> Load Balancer
       '/health': {
-        target: 'http://127.0.0.1:6000',
+        target: LB,
         changeOrigin: true,
       },
-
-      // REST API -> Load Balancer
-      '/api': {
-        target: 'http://127.0.0.1:6000',
+      '/message': {
+        target: LB,
         changeOrigin: true,
       },
-
-      // Load Balancer status
+      '/feed': {
+        target: LB,
+        changeOrigin: true,
+      },
       '/lb': {
-        target: 'http://127.0.0.1:6000',
+        target: LB,
+        changeOrigin: true,
+      },
+      '/api': {
+        target: LB,
         changeOrigin: true,
       },
     },

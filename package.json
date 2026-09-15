@@ -1,14 +1,20 @@
 {
   "name": "group-chat-app",
-  "version": "1.0.0",
-  "description": "Real-time Group Chat Frontend (WebSocket-ready) — Load Balanced",
+  "version": "2.1.0",
+  "description": "Real-time Group Chat — Load Balanced across 4 lab systems",
   "scripts": {
-    "loadbalancer": "python load_balancer/balancer.py --host 0.0.0.0 --port 6000 --backends http://10.1.75.53:5202,http://10.1.75.53:5203,http://10.1.75.53:5204 --algorithm round_robin",
-    "frontend": "vite --host 0.0.0.0 --port 5000",
+    "loadbalancer": "python load_balancer/balancer.py --host 0.0.0.0 --port 6000 --backends http://10.1.75.53:5206,http://10.1.75.53:5207,http://10.1.75.53:5208 --algorithm performance --threshold 500",
+    "frontend": "vite --host 0.0.0.0 --port 3000",
     "app": "concurrently -n \"LB,FRONTEND\" \"npm run loadbalancer\" \"npm run frontend\"",
     "logs": "python logs.py",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "load-test": "python load_generator/generator.py --url http://10.1.75.53:6205 --requests 300 --concurrency 15 --scenario mixed",
+    "status": "python deploy.py --status",
+    "deploy": "python deploy.py",
+    "deploy-backends": "python deploy.py --backends",
+    "deploy-lb": "python deploy.py --lb",
+    "stop": "python deploy.py --stop"
   },
   "devDependencies": {
     "concurrently": "^10.0.4",
